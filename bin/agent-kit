@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+_load_env_file() {
+    local env_file="$KIT_DIR/.env"
+    [[ -f "$env_file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" == *"="* ]] || continue
+        local key="${line%%=*}"
+        local value="${line#*=}"
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        if [[ -z "${!key+x}" ]]; then
+            value="${value%\"}"
+            value="${value#\"}"
+            value="${value%\'}"
+            value="${value#\'}"
+            export "$key=$value"
+        fi
+    done < "$env_file"
+}
+
+_load_env_file
+
+if [[ -n "${NPS_STATE_HOME:-}" ]]; then
+    STATE_HOME="$NPS_STATE_HOME"
+elif [[ -n "${XDG_STATE_HOME:-}" ]]; then
+    STATE_HOME="$XDG_STATE_HOME/nps-agent-kit"
+else
+    STATE_HOME="$HOME/.nps-agent-kit"
+fi
+
+NPS_AGENTS_HOME="${NPS_AGENTS_HOME:-$STATE_HOME/agents}"
+NPS_WORKTREES_HOME="${NPS_WORKTREES_HOME:-$STATE_HOME/worktrees}"
+NPS_LOGS_HOME="${NPS_LOGS_HOME:-$STATE_HOME/logs}"
+NPS_ISSUER_DOMAIN="${NPS_ISSUER_DOMAIN:-dev.localhost}"
+NPS_ISSUER_AGENT_ID="${NPS_ISSUER_AGENT_ID:-operator}"
+NPS_AGENT_RUNTIME_CMD="${NPS_AGENT_RUNTIME_CMD:-$KIT_DIR/scripts/runtime/mock-worker.sh}"
+
+log() { printf '[agent-kit] %s\n' "$*"; }
+err() { printf '[agent-kit] %s\n' "$*" >&2; }
+
+_usage() {
+    cat <<'EOF'
+agent-kit - NPS v0 reference kernel
+
+Usage:
+  agent-kit setup <worker-id> [type]
+  agent-kit dispatch <worker-id> "<intent>" --scope <git-directory> [--budget N] [--time-limit S]
+  agent-kit status <worker-id>
+  agent-kit validate-result <result.json>
+
+Environment:
+  NPS_STATE_HOME, NPS_AGENTS_HOME, NPS_WORKTREES_HOME, NPS_LOGS_HOME
+  NPS_AGENT_RUNTIME_CMD
+EOF
+}
+
+_nid() {
+    printf 'urn:nps:agent:%s:%s' "$NPS_ISSUER_DOMAIN" "$1"
+}
+
+cmd_setup() {
+    local worker_id="${1:-}"
+    local worker_type="${2:-coder}"
+    [[ -n "$worker_id" ]] || { err "usage: agent-kit setup <worker-id> [type]"; return 2; }
+
+    local worker_dir="$NPS_AGENTS_HOME/$worker_id"
+    mkdir -p "$worker_dir/inbox" "$worker_dir/active" "$worker_dir/done"
+    cat > "$worker_dir/WORKER.md" <<EOF
+# Worker $worker_id
+
+Type: $worker_type
+NID: $(_nid "$worker_id")
+
+Protocol:
+- Claim one intent by moving it from inbox/ to active/.
+- Archive the intent in done/.
+- Write done/<task-id>.result.json.
+- Do not push.
+EOF
+    log "Worker ready: $worker_dir"
+}
+
+cmd_status() {
+    local worker_id="${1:-}"
+    [[ -n "$worker_id" ]] || { err "usage: agent-kit status <worker-id>"; return 2; }
+    local worker_dir="$NPS_AGENTS_HOME/$worker_id"
+    [[ -d "$worker_dir" ]] || { err "KIT-STATUS-WORKER-NOT-SET-UP: $worker_id"; return 1; }
+    printf 'worker: %s\n' "$worker_id"
+    for state in inbox active done; do
+        printf '\n%s:\n' "$state"
+        find "$worker_dir/$state" -maxdepth 1 -type f -print 2>/dev/null | sed 's/^/  /' | tail -10
+    done
+}
+
+_uuid() {
+    python3 - <<'PY'
+from uuid import uuid4
+print(uuid4())
+PY
+}
+
+_deadline_at() {
+    TIME_LIMIT="$1" python3 - <<'PY'
+import os
+from datetime import datetime, timedelta, timezone
+
+seconds = int(os.environ["TIME_LIMIT"])
+print((datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+_write_intent() {
+    INTENT_FILE="$1" TASK_ID="$2" WORKER_ID="$3" INTENT_TEXT="$4" SCOPE="$5" \
+    BUDGET="$6" DEADLINE_AT="$7" TARGET_BRANCH="$8" python3 - <<'PY'
+import json
+import os
+
+issuer_domain = os.environ.get("NPS_ISSUER_DOMAIN", "dev.localhost")
+issuer_agent = os.environ.get("NPS_ISSUER_AGENT_ID", "operator")
+worker = os.environ["WORKER_ID"]
+task_id = os.environ["TASK_ID"]
+
+message = {
+    "frame": "0x41",
+    "parent_task_id": task_id,
+    "subtask_id": task_id,
+    "node_id": "root",
+    "target_agent_nid": f"urn:nps:agent:{issuer_domain}:{worker}",
+    "action": "nwp://local.agent-kit/execute",
+    "params": {"intent": os.environ["INTENT_TEXT"]},
+    "delegated_scope": {
+        "nodes": [],
+        "actions": ["nwp://local.agent-kit/execute"],
+        "max_token_budget": int(os.environ["BUDGET"]),
+        "custom": {"paths": [os.environ["SCOPE"]]},
+    },
+    "deadline_at": os.environ["DEADLINE_AT"],
+    "idempotency_key": task_id,
+    "priority": "normal",
+    "context": {
+        "branch": os.environ["TARGET_BRANCH"],
+        "issuer_nid": f"urn:nps:agent:{issuer_domain}:{issuer_agent}",
+        "mailbox_base": os.path.dirname(os.path.dirname(os.environ["INTENT_FILE"])),
+    },
+}
+
+with open(os.environ["INTENT_FILE"], "w", encoding="utf-8") as fh:
+    json.dump(message, fh, indent=2)
+    fh.write("\n")
+PY
+}
+
+cmd_validate_result() {
+    local result_file="${1:-}"
+    [[ -n "$result_file" ]] || { err "usage: agent-kit validate-result <result.json>"; return 2; }
+    python3 "$KIT_DIR/scripts/validate-result.py" "$result_file"
+}
+
+cmd_dispatch() {
+    local worker_id="${1:-}"
+    local intent_text="${2:-}"
+    shift 2 || true
+
+    local scope="" budget="40000" time_limit="900" branch_name="" target_branch=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scope) scope="${2:-}"; shift 2 ;;
+            --budget) budget="${2:-}"; shift 2 ;;
+            --time-limit) time_limit="${2:-}"; shift 2 ;;
+            --branch-name) branch_name="${2:-}"; shift 2 ;;
+            --target-branch) target_branch="${2:-}"; shift 2 ;;
+            --help|-h) _usage; return 0 ;;
+            *) err "unknown dispatch option: $1"; return 2 ;;
+        esac
+    done
+
+    [[ -n "$worker_id" && -n "$intent_text" ]] || { err "usage: agent-kit dispatch <worker-id> \"<intent>\" --scope <git-directory>"; return 2; }
+    [[ -n "$scope" ]] || { err "KIT-DISPATCH-SCOPE-REQUIRED: v0 requires one directory scope"; return 2; }
+    [[ "$scope" != *","* ]] || { err "KIT-DISPATCH-SCOPE-UNSUPPORTED: v0 supports exactly one scope path"; return 2; }
+    [[ -d "$scope" ]] || { err "KIT-DISPATCH-SCOPE-UNSUPPORTED: v0 scope must be an existing directory"; return 2; }
+
+    local worker_dir="$NPS_AGENTS_HOME/$worker_id"
+    [[ -d "$worker_dir" ]] || { err "KIT-DISPATCH-WORKER-NOT-SET-UP: $worker_id"; return 1; }
+    [[ -x "$NPS_AGENT_RUNTIME_CMD" ]] || { err "KIT-DISPATCH-RUNTIME-NOT-EXECUTABLE: $NPS_AGENT_RUNTIME_CMD"; return 1; }
+
+    local git_root
+    git_root=$(git -C "$scope" rev-parse --show-toplevel 2>/dev/null) || {
+        err "KIT-DISPATCH-SCOPE-NOT-GIT: $scope"
+        return 1
+    }
+    if [[ -z "$target_branch" ]]; then
+        target_branch=$(git -C "$git_root" symbolic-ref --short HEAD 2>/dev/null) || {
+            err "KIT-DISPATCH-DETACHED-HEAD: pass --target-branch"
+            return 1
+        }
+    fi
+
+    local task_id worktree relative_scope mapped_scope
+    task_id="$(_uuid)"
+    worktree="$NPS_WORKTREES_HOME/$task_id"
+    branch_name="${branch_name:-agent/$worker_id/$task_id}"
+
+    mkdir -p "$NPS_WORKTREES_HOME" "$NPS_LOGS_HOME"
+    git -C "$git_root" worktree add "$worktree" -b "$branch_name" >/dev/null 2>&1 || {
+        err "KIT-DISPATCH-WORKTREE-CREATE-FAILED: $worktree"
+        return 1
+    }
+
+    relative_scope=$(git -C "$scope" rev-parse --show-prefix 2>/dev/null)
+    relative_scope="${relative_scope%/}"
+    if [[ -n "$relative_scope" ]]; then
+        mapped_scope="$worktree/$relative_scope"
+        mkdir -p "$mapped_scope"
+    else
+        mapped_scope="$worktree"
+    fi
+
+    local deadline_at intent_file result_file raw_file
+    deadline_at="$(_deadline_at "$time_limit")"
+    intent_file="$worker_dir/inbox/$task_id.intent.json"
+    result_file="$worker_dir/done/$task_id.result.json"
+    raw_file="$worker_dir/done/$task_id.raw-output.log"
+
+    _write_intent "$intent_file" "$task_id" "$worker_id" "$intent_text" "$mapped_scope" "$budget" "$deadline_at" "$target_branch"
+    log "Intent created: $task_id"
+    log "Worktree: $worktree"
+    log "Branch: $branch_name"
+
+    NPS_TASK_ID="$task_id" \
+    NPS_WORKER_ID="$worker_id" \
+    NPS_ISSUER_DOMAIN="$NPS_ISSUER_DOMAIN" \
+    NPS_AGENT_DIR="$worker_dir" \
+    NPS_INTENT_FILE="$intent_file" \
+    NPS_RESULT_FILE="$result_file" \
+    NPS_WORKTREE="$worktree" \
+    NPS_SCOPE="$mapped_scope" \
+    "$NPS_AGENT_RUNTIME_CMD" > "$raw_file" 2>&1 || true
+
+    if [[ -f "$worker_dir/inbox/$task_id.intent.json" && ! -f "$result_file" ]]; then
+        mv "$worker_dir/inbox/$task_id.intent.json" "$worker_dir/done/$task_id.unclaimed.intent.json"
+        err "KIT-DISPATCH-NO-LIFECYCLE: worker did not claim intent"
+        err "  Raw output: $raw_file"
+        return 1
+    fi
+
+    if [[ ! -f "$result_file" ]]; then
+        err "KIT-DISPATCH-NO-RESULT: worker claimed intent but wrote no result"
+        err "  Raw output: $raw_file"
+        return 1
+    fi
+
+    if ! "$KIT_DIR/bin/agent-kit" validate-result "$result_file" >/dev/null; then
+        err "KIT-DISPATCH-RESULT-SCHEMA-INVALID: $result_file"
+        return 1
+    fi
+
+    python3 - "$worker_dir/done/$task_id.branch.json" <<PY
+import json
+meta = {
+    "task_id": "$task_id",
+    "agent_id": "$worker_id",
+    "branch": "$branch_name",
+    "target_branch": "$target_branch",
+    "git_root": "$git_root",
+    "worktree": "$worktree",
+    "original_scope": "$scope",
+    "mapped_scope": "$mapped_scope",
+}
+open("$worker_dir/done/$task_id.branch.json", "w").write(json.dumps(meta, indent=2) + "\\n")
+PY
+
+    log "Result: $result_file"
+    log "Branch metadata: $worker_dir/done/$task_id.branch.json"
+}
+
+case "${1:-}" in
+    setup) shift; cmd_setup "$@" ;;
+    dispatch) shift; cmd_dispatch "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    validate-result) shift; cmd_validate_result "$@" ;;
+    --help|-h|help|"") _usage ;;
+    *) err "unknown command: $1"; _usage; exit 2 ;;
+esac

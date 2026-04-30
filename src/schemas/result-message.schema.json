@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Lab-Cubes/Neural-Protocol-Suite-agent-kit/src/schemas/result-message.schema.json",
+  "title": "FinalAlignStreamResult",
+  "type": "object",
+  "required": ["frame", "stream_id", "task_id", "subtask_id", "seq", "is_final", "sender_nid"],
+  "additionalProperties": false,
+  "anyOf": [
+    { "required": ["data"] },
+    { "required": ["error"] }
+  ],
+  "properties": {
+    "frame": { "type": "string", "const": "0x43" },
+    "stream_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "subtask_id": { "type": "string" },
+    "seq": { "type": "integer", "minimum": 0 },
+    "payload_ref": { "type": "string" },
+    "data": {
+      "type": "object",
+      "required": ["status", "picked_up_at", "completed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["completed", "failed", "cancelled", "skipped"] },
+        "summary": { "type": "string" },
+        "picked_up_at": { "type": "string" },
+        "completed_at": { "type": "string" },
+        "duration": { "type": "integer" },
+        "cost_npt": { "type": "integer" },
+        "files_changed": { "type": "array", "items": { "type": "string" } },
+        "commits": { "type": "array", "items": { "type": "string" } },
+        "follow_up": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "window_size": { "type": "integer", "minimum": 0 },
+    "is_final": { "type": "boolean", "const": true },
+    "sender_nid": { "type": "string", "pattern": "^urn:nps:agent:" },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}

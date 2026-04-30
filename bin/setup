@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ ! -f "$KIT_DIR/.env" ]]; then
+    cp "$KIT_DIR/.env.example" "$KIT_DIR/.env"
+    echo "[setup] Created .env from .env.example"
+fi
+
+"$KIT_DIR/bin/agent-kit" setup coder-01 coder
+date -u +%Y-%m-%dT%H:%M:%SZ > "$KIT_DIR/.nps-installed"
+
+echo "[setup] Ready"
+echo "[setup] Try: ./scripts/smoke-test.sh"
