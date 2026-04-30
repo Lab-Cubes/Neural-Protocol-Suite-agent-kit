@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Lab-Cubes/Neural-Protocol-Suite-agent-kit/src/schemas/intent-message.schema.json",
+  "title": "DelegateFrameMailboxIntent",
+  "type": "object",
+  "required": [
+    "frame",
+    "parent_task_id",
+    "subtask_id",
+    "node_id",
+    "target_agent_nid",
+    "action",
+    "delegated_scope",
+    "deadline_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "frame": { "type": "string", "const": "0x41" },
+    "parent_task_id": { "type": "string" },
+    "subtask_id": { "type": "string" },
+    "node_id": { "type": "string" },
+    "target_agent_nid": { "type": "string", "pattern": "^urn:nps:agent:" },
+    "action": { "type": "string", "pattern": "^nwp://" },
+    "params": {
+      "type": "object",
+      "properties": {
+        "intent": { "type": "string" }
+      }
+    },
+    "delegated_scope": {
+      "type": "object",
+      "required": ["nodes", "actions", "max_token_budget"],
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^nwp://" }
+        },
+        "max_token_budget": { "type": "integer", "minimum": 1 },
+        "custom": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "paths": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "deadline_at": { "type": "string" },
+    "idempotency_key": { "type": "string" },
+    "priority": { "type": "string", "enum": ["low", "normal", "high"] },
+    "context": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

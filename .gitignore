@@ -1,0 +1,6 @@
+.env
+.nps-installed
+node_modules/
+dist/
+coverage/
+.DS_Store
