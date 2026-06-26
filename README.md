@@ -1,5 +1,10 @@
 # Neural Protocol Suite Agent Kit
 
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
+[![Suite](https://img.shields.io/badge/suite-v1.0.0--alpha.13-orange.svg)](https://github.com/labacacia/NPS-Release/releases/tag/v1.0.0-alpha.13)
+[![Next](https://img.shields.io/badge/next-v1.0.0--alpha.14--candidate-yellow.svg)](https://github.com/labacacia/NPS-Release)
+[![NOP](https://img.shields.io/badge/NOP-v0.7-ff8c42.svg)]()
+
 Reference kernel for NPS/NOP-style local agent dispatch.
 
 This repository intentionally starts small. The v0 promise is:
